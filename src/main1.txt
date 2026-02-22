@@ -1,0 +1,125 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <SD.h>
+
+// === 1. 引用你原本的驱动，用于打开电源 ===
+// 请确保这些 .h 文件都在你的 src 目录下
+#include "PWR_Key.h"
+#include "BAT_Driver.h"
+// 我们不引用 Display_ST7789.h，因为我们要用 GFX 接管屏幕
+// #include "Display_ST7789.h" 
+
+// === 2. 引入绘图库 ===
+#include <Arduino_GFX_Library.h>
+#include <PNGdec.h>
+
+// === 3. 定义引脚 (Waveshare ESP32-S3-LCD-2.8) ===
+#define TFT_BL   9
+#define TFT_CS   5
+#define TFT_DC   4
+#define TFT_RST  8
+#define TFT_MOSI 7
+#define TFT_SCLK 6
+#define TFT_MISO -1 
+
+#define SD_CS_PIN 42 
+#define SD_MOSI   11
+#define SD_MISO   13
+#define SD_CLK    12
+
+// === 4. 定义对象 ===
+// 使用标准 SPI 接口
+Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, TFT_MISO);
+
+// 初始化 ST7789 (480x640)
+Arduino_GFX *gfx = new Arduino_ST7789(
+  bus, TFT_RST, 
+  0 /* rotation */, true /* IPS */, 
+  480 /* width */, 640 /* height */
+);
+
+PNG png;
+
+// === 5. PNG 回调函数 ===
+void * pngOpen(const char *filename, int32_t *size) {
+    File file = SD.open(filename);
+    if (!file) return NULL;
+    *size = file.size();
+    return new File(file);
+}
+void pngClose(void *handle) {
+    File *file = (File*)handle;
+    if (file) { file->close(); delete file; }
+}
+int32_t pngRead(PNGFILE *page, uint8_t *buffer, int32_t length) {
+    File *file = (File*)page->fHandle;
+    return file->read(buffer, length);
+}
+int32_t pngSeek(PNGFILE *page, int32_t position) {
+    File *file = (File*)page->fHandle;
+    if (file) { file->seek(position); return position; }
+    return -1;
+}
+int pngDraw(PNGDRAW *pDraw) {
+    uint16_t lineBuffer[480]; 
+    png.getLineAsRGB565(pDraw, lineBuffer, PNG_RGB565_BIG_ENDIAN, 0xffffffff);
+    gfx->draw16bitRGBBitmap(0, pDraw->y, lineBuffer, pDraw->iWidth, 1);
+    return 1; 
+}
+
+// === 6. 主程序 ===
+void setup() {
+    Serial.begin(115200);
+    
+    // ----------- 关键：使用你原本的驱动上电 -----------
+    Serial.println("Power Init...");
+    PWR_Init();  // 打开板载电源管理
+    BAT_Init();  // 电池驱动初始化
+    
+    // 初始化背光 (使用你原本的驱动逻辑，如果有的话)
+    // 如果 Backlight_Init() 在 Display_ST7789.cpp 里，可能无法调用
+    // 所以我们手动初始化背光引脚，防止冲突
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, HIGH); 
+    
+    // ----------- 初始化 SD 卡 -----------
+    // 手动初始化 SD，不使用你原来的 SD_Init()，防止它占用 SPI
+    SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS_PIN);
+    if (!SD.begin(SD_CS_PIN, SPI, 40000000)) {
+        Serial.println("SD Mount Failed");
+    } else {
+        Serial.println("SD Mounted");
+    }
+
+    // ----------- 初始化屏幕 (使用 GFX) -----------
+    Serial.println("GFX Init...");
+    gfx->begin();
+    gfx->fillScreen(0x0000); // BLACK
+    
+    gfx->setTextSize(2);
+    gfx->setTextColor(0xFFFF); // WHITE
+    gfx->setCursor(10, 10);
+    gfx->println("Power ON & Init OK");
+
+    // ----------- 显示图片 -----------
+    if (SD.exists("/test1.png")) {
+        int16_t rc = png.open("/test1.png", pngOpen, pngClose, pngRead, pngSeek, pngDraw);
+        if (rc == PNG_SUCCESS) {
+            gfx->fillScreen(0x0000);
+            png.decode(NULL, 0);
+            Serial.println("PNG Decoded");
+        } else {
+            gfx->setTextColor(0xF800); // RED
+            gfx->printf("PNG Error: %d", rc);
+        }
+    } else {
+        gfx->setTextColor(0xF800);
+        gfx->println("test1.png not found!");
+    }
+}
+
+void loop() {
+    // 必须保留这个，否则部分开发板的电源管理芯片检测到无操作会自动断电
+    PWR_Loop(); 
+    delay(10);
+}

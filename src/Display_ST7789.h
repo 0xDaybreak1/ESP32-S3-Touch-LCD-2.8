@@ -34,6 +34,7 @@ void LCD_SetCursor(uint16_t x1, uint16_t y1, uint16_t x2,uint16_t y2);
 void LCD_Init(void);
 void LCD_SetCursor(uint16_t Xstart, uint16_t Ystart, uint16_t Xend, uint16_t  Yend);
 void LCD_addWindow(uint16_t Xstart, uint16_t Ystart, uint16_t Xend, uint16_t Yend,uint16_t* color);
+void LCD_WriteData_nbyte(uint8_t* SetData, uint8_t* ReadData, uint32_t Size);
 
 void Backlight_Init(void);
 void Set_Backlight(uint8_t Light);
