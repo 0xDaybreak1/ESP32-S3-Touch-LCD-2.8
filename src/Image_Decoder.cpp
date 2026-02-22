@@ -119,12 +119,47 @@ bool displayJPEG(const char* filename) {
         return false;
     }
     
-    // 使用 TJpgDec 库解码并显示
+    // 【关键修复】先将整个 JPEG 文件读入内存
+    File jpegFile = SD_MMC.open(filename, FILE_READ);
+    if (!jpegFile) {
+        Serial.printf("错误: 无法打开文件 - %s\n", filename);
+        return false;
+    }
+    
+    size_t fileSize = jpegFile.size();
+    Serial.printf("JPEG 文件大小: %d 字节\n", fileSize);
+    
+    // 分配内存缓冲区
+    uint8_t* jpegBuffer = (uint8_t*)malloc(fileSize);
+    if (jpegBuffer == nullptr) {
+        Serial.println("错误: 无法分配 JPEG 缓冲区");
+        jpegFile.close();
+        return false;
+    }
+    
+    // 读取整个文件到内存
+    size_t bytesRead = jpegFile.read(jpegBuffer, fileSize);
+    jpegFile.close(); // 【关键】立即关闭文件,释放 SD 卡总线
+    
+    if (bytesRead != fileSize) {
+        Serial.printf("错误: 读取文件失败 (期望 %d 字节, 实际 %d 字节)\n", fileSize, bytesRead);
+        free(jpegBuffer);
+        return false;
+    }
+    
+    Serial.println("✓ JPEG 文件已完整读入内存,SD 卡总线已释放");
+    
+    // 现在从内存解码并显示 (不再访问 SD 卡)
     TJpgDec.setJpgScale(1);
     TJpgDec.setCallback(jpegDrawCallback);
-    TJpgDec.drawJpg(0, 0, filename);
     
-    Serial.println("JPEG 图片显示完成");
+    // 使用内存缓冲区解码
+    TJpgDec.drawJpg(0, 0, jpegBuffer, fileSize);
+    
+    // 释放内存
+    free(jpegBuffer);
+    
+    Serial.println("✓ JPEG 图片显示完成");
     return true;
 }
 
@@ -138,8 +173,39 @@ bool displayPNG(const char* filename) {
         return false;
     }
     
+    // 【关键修复】先将整个 PNG 文件读入内存
+    File pngFile = SD_MMC.open(filename, FILE_READ);
+    if (!pngFile) {
+        Serial.printf("错误: 无法打开文件 - %s\n", filename);
+        return false;
+    }
+    
+    size_t fileSize = pngFile.size();
+    Serial.printf("PNG 文件大小: %d 字节\n", fileSize);
+    
+    // 分配内存缓冲区
+    uint8_t* pngBuffer = (uint8_t*)malloc(fileSize);
+    if (pngBuffer == nullptr) {
+        Serial.println("错误: 无法分配 PNG 缓冲区");
+        pngFile.close();
+        return false;
+    }
+    
+    // 读取整个文件到内存
+    size_t bytesRead = pngFile.read(pngBuffer, fileSize);
+    pngFile.close(); // 【关键】立即关闭文件,释放 SD 卡总线
+    
+    if (bytesRead != fileSize) {
+        Serial.printf("错误: 读取文件失败 (期望 %d 字节, 实际 %d 字节)\n", fileSize, bytesRead);
+        free(pngBuffer);
+        return false;
+    }
+    
+    Serial.println("✓ PNG 文件已完整读入内存,SD 卡总线已释放");
+    
+    // 现在从内存解码并显示 (不再访问 SD 卡)
     PNG png;
-    int rc = png.open((const char*)filename, pngFileOpen, pngFileClose, pngFileRead, pngFileSeek, pngDrawCallback);
+    int rc = png.openRAM(pngBuffer, fileSize, pngDrawCallback);
     
     if (rc == PNG_SUCCESS) {
         Serial.printf("PNG 信息 - 宽: %d, 高: %d\n", png.getWidth(), png.getHeight());
@@ -149,12 +215,16 @@ bool displayPNG(const char* filename) {
         
         png.close();
         
+        // 释放内存
+        free(pngBuffer);
+        
         if (rc == PNG_SUCCESS) {
-            Serial.println("PNG 图片显示完成");
+            Serial.println("✓ PNG 图片显示完成");
             return true;
         }
     }
     
+    free(pngBuffer);
     Serial.printf("PNG 解码失败，错误码: %d\n", rc);
     return false;
 }
@@ -231,16 +301,39 @@ bool displayBMP(const char* filename) {
         return false;
     }
     
-    // 逐行读取并显示 BMP 数据
-    // BMP 文件中像素数据从下到上存储，所以需要从下往上读取
-    bmpFile.seek(pixelDataOffset);
+    // 【关键修复】先读取所有像素数据到内存
+    uint32_t pixelDataSize = rowSize * height;
+    uint8_t* pixelData = (uint8_t*)malloc(pixelDataSize);
     
+    if (pixelData == nullptr) {
+        Serial.println("错误: 无法分配像素数据缓冲区");
+        free(rowBuffer);
+        free(outputBuffer);
+        bmpFile.close();
+        return false;
+    }
+    
+    // 读取所有像素数据
+    bmpFile.seek(pixelDataOffset);
+    size_t bytesRead = bmpFile.read(pixelData, pixelDataSize);
+    bmpFile.close(); // 【关键】立即关闭文件,释放 SD 卡总线
+    
+    if (bytesRead != pixelDataSize) {
+        Serial.printf("错误: 读取像素数据失败 (期望 %d 字节, 实际 %d 字节)\n", pixelDataSize, bytesRead);
+        free(pixelData);
+        free(rowBuffer);
+        free(outputBuffer);
+        return false;
+    }
+    
+    Serial.println("✓ BMP 像素数据已完整读入内存,SD 卡总线已释放");
+    
+    // 逐行处理并显示 BMP 数据
+    // BMP 文件中像素数据从下到上存储，所以需要从下往上读取
     for (int32_t y = height - 1; y >= 0; y--) {
-        // 读取一行像素数据
-        if (bmpFile.read(rowBuffer, rowSize) != rowSize) {
-            Serial.printf("错误: 读取第 %d 行失败\n", y);
-            break;
-        }
+        // 从内存缓冲区复制一行数据
+        uint32_t rowOffset = (height - 1 - y) * rowSize;
+        memcpy(rowBuffer, &pixelData[rowOffset], rowSize);
         
         // 转换 BGR 到 RGB565 (BMP 使用 BGR 格式)
         for (uint32_t x = 0; x < width; x++) {
@@ -258,9 +351,9 @@ bool displayBMP(const char* filename) {
         LCD_WriteData_nbyte((uint8_t*)outputBuffer, NULL, width * 2);
     }
     
+    free(pixelData);
     free(rowBuffer);
     free(outputBuffer);
-    bmpFile.close();
     
     Serial.println("BMP 图片显示完成");
     return true;

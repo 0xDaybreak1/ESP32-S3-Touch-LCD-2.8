@@ -99,46 +99,39 @@ void setup()
   delay(1000);
   
   Serial.println("系统初始化完成");
-  Serial.println("准备显示图片: /sdcard/test1.png");
+  Serial.println("准备显示图片: /sdcard/test1.jpg");
 }
 
 // 主循环
 void loop()
 {
-  // 刷新 LVGL 显示
-  Lvgl_Loop();
-  
-  // 静态变量用于控制图片显示时机
-  static bool imageDisplayed = false;
-  static unsigned long lastDisplayTime = 0;
-  
-  // 仅在启动后 2 秒显示一次图片
-  if (!imageDisplayed && (millis() - lastDisplayTime > 2000)) {
-    Serial.println("\n========== 开始显示图片 ==========");
-    
-    // 尝试显示 PNG 图片
-    if (loadAndDisplayImage("/sdcard/test1.png")) {
-      Serial.println("✓ PNG 图片显示成功");
-    } else {
-      Serial.println("✗ PNG 图片显示失败，尝试其他格式...");
-      
-      // 尝试 JPEG 格式
-      if (loadAndDisplayImage("/sdcard/test1.jpg")) {
-        Serial.println("✓ JPEG 图片显示成功");
-      } else {
-        // 尝试 BMP 格式
-        if (loadAndDisplayImage("/sdcard/test1.bmp")) {
-          Serial.println("✓ BMP 图片显示成功");
+    // ⛔ 【核心修改】：彻底注释掉 LVGL 的刷新，防止其抢占 SPI
+    // Lvgl_Loop(); 
+
+    static unsigned long lastSwitchTime = 0;
+    static int imageIndex = 0;
+    const unsigned long displayInterval = 5000; 
+
+    const char* imageFiles[] = {
+        "/test1.jpg",
+        "/test2.jpg"
+    };
+    const int totalImages = 2;
+
+    if (millis() - lastSwitchTime > displayInterval) {
+        lastSwitchTime = millis();
+        
+        Serial.printf("\n--- 正在独立解码: %s ---\n", imageFiles[imageIndex]);
+
+        // 尝试显示图片
+        if (loadAndDisplayImage(imageFiles[imageIndex])) {
+            Serial.println("✓ 渲染成功！");
         } else {
-          Serial.println("✗ 所有格式都失败，请检查文件是否存在");
+            Serial.println("✗ 渲染失败！");
         }
-      }
+
+        imageIndex = (imageIndex + 1) % totalImages;
     }
-    
-    Serial.println("========== 图片显示完成 ==========\n");
-    imageDisplayed = true;
-  }
-  
-  // 延迟以避免过度占用 CPU
-  vTaskDelay(pdMS_TO_TICKS(5));
+
+    vTaskDelay(pdMS_TO_TICKS(10)); 
 }
