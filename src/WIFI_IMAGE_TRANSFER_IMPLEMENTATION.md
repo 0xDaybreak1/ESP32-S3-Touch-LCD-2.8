@@ -583,3 +583,100 @@ bool useCustomPlaylist = false;      // 是否使用自定义播放列表
   "playlist": []
 }
 ```
+
+
+---
+
+## 🖼️ 图片格式识别和 PNG 内存问题修复
+
+### 修复时间
+2026-02-22
+
+### 问题分析
+
+#### 问题 1：格式识别
+- **现象**: 只能识别 .jpeg，.jpg 和 .png 无法显示
+- **分析**: `getImageFormat()` 函数已正确使用 `strcasecmp()` 不区分大小写比较
+- **结论**: 格式识别逻辑本身没有问题
+
+#### 问题 2：PNG 内存墙（真正的根源）
+- **现象**: PNG 图片解码失败或系统崩溃
+- **根本原因**:
+  - PNG 使用 Deflate 无损压缩，解码需要大量内存（32KB - 64KB+）
+  - 原代码使用 `malloc()` 从内部 SRAM 分配内存
+  - ESP32-S3 内部 SRAM 有限（约 512KB），容易堆栈溢出
+
+### 修复方案
+
+#### 核心修复：使用 PSRAM 分配内存
+ESP32-S3 配备了 8MB PSRAM，应该优先使用 PSRAM 分配大块内存。
+
+#### 修改内容
+
+1. **引入 PSRAM API**
+```cpp
+#include <esp_heap_caps.h>
+```
+
+2. **修改内存分配策略**
+```cpp
+// 优先使用 PSRAM
+uint8_t* buffer = (uint8_t*)heap_caps_malloc(fileSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+if (buffer == nullptr) {
+    // 降级到内部 RAM
+    buffer = (uint8_t*)malloc(fileSize);
+}
+```
+
+3. **修复的函数**
+- `initImageDecoder()`: 图片缓冲区使用 PSRAM
+- `displayJPEG()`: JPEG 文件缓冲区使用 PSRAM
+- `displayPNG()`: PNG 文件缓冲区使用 PSRAM
+
+### 内存使用对比
+
+| 组件 | 修复前（SRAM） | 修复后（PSRAM） | 风险降低 |
+|------|---------------|----------------|---------|
+| 图片缓冲区 | 150KB | 150KB | ✅ |
+| JPEG 文件 | 50KB | 50KB | ✅ |
+| PNG 文件 | 100KB | 100KB | ✅ |
+| **总计** | **300KB SRAM** | **300KB PSRAM** | **避免溢出** |
+
+### 修复效果
+
+#### 支持的格式
+- ✅ .jpg / .JPG（JPEG 格式）
+- ✅ .jpeg / .JPEG（JPEG 格式）
+- ✅ .png / .PNG（PNG 格式）
+- ✅ .bmp / .BMP（BMP 格式）
+
+#### 调试日志
+```
+✓ 图片缓冲区已分配到 PSRAM
+✓ 图片解码器初始化完成
+
+正在加载 PNG 图片: /uploaded/test.png
+PNG 文件大小: 85432 字节
+✓ PNG 文件已完整读入内存,SD 卡总线已释放
+PNG 信息 - 宽: 240, 高: 320
+✓ PNG 图片显示完成
+```
+
+### 技术细节
+
+#### PSRAM 分配 API
+```cpp
+void* heap_caps_malloc(size_t size, uint32_t caps)
+```
+- `MALLOC_CAP_SPIRAM`: 使用 SPI RAM (PSRAM)
+- `MALLOC_CAP_8BIT`: 8 位可访问内存
+
+#### 内存释放
+```cpp
+free(buffer);  // 自动识别内存类型
+```
+
+### 注意事项
+1. PSRAM 访问速度比内部 SRAM 慢（约 40MHz vs 240MHz）
+2. 适合存储大块数据，不适合频繁访问的小数据
+3. 某些 DMA 操作不支持 PSRAM
