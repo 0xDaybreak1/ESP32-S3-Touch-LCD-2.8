@@ -1,0 +1,846 @@
+#include "WebServer_Driver.h"
+#include <ArduinoJson.h>
+
+// 全局对象
+AsyncWebServer server(80);
+SemaphoreHandle_t sdCardMutex = NULL;
+char currentDisplayFile[100] = "";
+
+// 播放列表相关
+std::vector<String> customPlaylist;  // 自定义播放列表
+bool useCustomPlaylist = false;      // 是否使用自定义播放列表
+
+// 上传状态
+File uploadFile;
+String uploadFilename = "";
+size_t uploadedBytes = 0;
+
+// Web 界面 HTML (嵌入式)
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 图片显示控制台</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; }
+        .header p { opacity: 0.9; font-size: 1.1em; }
+        .content { padding: 30px; }
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+        .section h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+        }
+        .upload-area {
+            border: 3px dashed #667eea;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .upload-area:hover {
+            background: #f0f4ff;
+            border-color: #764ba2;
+        }
+        .upload-area.dragover {
+            background: #e0e7ff;
+            border-color: #4c51bf;
+        }
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: all 0.3s;
+            margin: 5px;
+        }
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        .btn-danger {
+            background: #f56565;
+            color: white;
+        }
+        .btn-danger:hover {
+            background: #e53e3e;
+        }
+        .image-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .image-card {
+            background: white;
+            border-radius: 10px;
+            padding: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: all 0.3s;
+        }
+        .image-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 15px rgba(0,0,0,0.2);
+        }
+        .image-card img {
+            width: 100%;
+            height: 150px;
+            object-fit: cover;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+        .image-card .name {
+            font-weight: bold;
+            margin-bottom: 10px;
+            word-break: break-all;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #e2e8f0;
+            border-radius: 15px;
+            overflow: hidden;
+            margin-top: 15px;
+            display: none;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+        }
+        .status {
+            margin-top: 15px;
+            padding: 15px;
+            border-radius: 8px;
+            display: none;
+        }
+        .status.success {
+            background: #c6f6d5;
+            color: #22543d;
+            display: block;
+        }
+        .status.error {
+            background: #fed7d7;
+            color: #742a2a;
+            display: block;
+        }
+        input[type="file"] { display: none; }
+        .color-picker {
+            width: 100%;
+            height: 50px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        .slider {
+            width: 100%;
+            height: 8px;
+            border-radius: 5px;
+            background: #e2e8f0;
+            outline: none;
+            margin: 15px 0;
+        }
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #667eea;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🖼️ ESP32 图片显示控制台</h1>
+            <p>WiFi 无线图片传输与显示控制</p>
+        </div>
+        
+        <div class="content">
+            <!-- 图片上传区域 -->
+            <div class="section">
+                <h2>📤 上传图片</h2>
+                <div class="upload-area" id="uploadArea">
+                    <p style="font-size: 3em; margin-bottom: 10px;">📁</p>
+                    <p style="font-size: 1.2em; margin-bottom: 10px;">拖拽图片到此处或点击选择</p>
+                    <p style="color: #718096;">支持 JPEG, PNG, BMP 格式</p>
+                    <input type="file" id="fileInput" accept="image/jpeg,image/png,image/bmp" multiple>
+                </div>
+                <div class="progress-bar" id="progressBar">
+                    <div class="progress-fill" id="progressFill">0%</div>
+                </div>
+                <div class="status" id="status"></div>
+            </div>
+            
+            <!-- 图片列表 -->
+            <div class="section">
+                <h2>🖼️ 图片库</h2>
+                <div style="margin-bottom: 15px;">
+                    <button class="btn btn-primary" onclick="refreshImageList()">🔄 刷新列表</button>
+                    <button class="btn btn-primary" onclick="playSelectedImages()">▶️ 播放选中图片</button>
+                    <button class="btn btn-danger" onclick="stopPlaylist()">⏹️ 停止播放列表</button>
+                </div>
+                <div class="image-grid" id="imageGrid">
+                    <p style="color: #718096;">加载中...</p>
+                </div>
+            </div>
+            
+            <!-- RGB 灯珠控制 (预留) -->
+            <div class="section">
+                <h2>🎨 RGB 灯珠控制</h2>
+                <p style="color: #718096; margin-bottom: 15px;">选择颜色和亮度</p>
+                <input type="color" class="color-picker" id="colorPicker" value="#ff0000">
+                <p style="margin-top: 15px;">亮度: <span id="brightnessValue">50</span>%</p>
+                <input type="range" class="slider" id="brightnessSlider" min="0" max="100" value="50">
+                <div style="margin-top: 15px;">
+                    <button class="btn btn-primary" onclick="setLED('solid')">💡 常亮</button>
+                    <button class="btn btn-primary" onclick="setLED('flow')">🌊 流水灯</button>
+                    <button class="btn btn-primary" onclick="setLED('breathe')">💨 呼吸灯</button>
+                    <button class="btn btn-danger" onclick="setLED('off')">⚫ 关闭</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const progressBar = document.getElementById('progressBar');
+        const progressFill = document.getElementById('progressFill');
+        const status = document.getElementById('status');
+        const imageGrid = document.getElementById('imageGrid');
+        const brightnessSlider = document.getElementById('brightnessSlider');
+        const brightnessValue = document.getElementById('brightnessValue');
+        
+        // 点击上传区域
+        uploadArea.addEventListener('click', () => fileInput.click());
+        
+        // 文件选择
+        fileInput.addEventListener('change', (e) => {
+            handleFiles(e.target.files);
+        });
+        
+        // 拖拽上传
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+        
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+        
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            handleFiles(e.dataTransfer.files);
+        });
+        
+        // 处理文件上传
+        async function handleFiles(files) {
+            for (let file of files) {
+                if (!file.type.match('image/(jpeg|png|bmp)')) {
+                    showStatus('仅支持 JPEG, PNG, BMP 格式', 'error');
+                    continue;
+                }
+                
+                await uploadFile(file);
+            }
+        }
+        
+        // 上传文件
+        async function uploadFile(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            progressBar.style.display = 'block';
+            status.style.display = 'none';
+            
+            try {
+                const xhr = new XMLHttpRequest();
+                
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        const percent = Math.round((e.loaded / e.total) * 100);
+                        progressFill.style.width = percent + '%';
+                        progressFill.textContent = percent + '%';
+                    }
+                });
+                
+                xhr.addEventListener('load', () => {
+                    if (xhr.status === 200) {
+                        showStatus('上传成功: ' + file.name, 'success');
+                        refreshImageList();
+                    } else {
+                        showStatus('上传失败: ' + xhr.statusText, 'error');
+                    }
+                    progressBar.style.display = 'none';
+                });
+                
+                xhr.addEventListener('error', () => {
+                    showStatus('上传失败: 网络错误', 'error');
+                    progressBar.style.display = 'none';
+                });
+                
+                xhr.open('POST', '/upload');
+                xhr.send(formData);
+                
+            } catch (error) {
+                showStatus('上传失败: ' + error.message, 'error');
+                progressBar.style.display = 'none';
+            }
+        }
+        
+        // 显示状态消息
+        function showStatus(message, type) {
+            status.textContent = message;
+            status.className = 'status ' + type;
+            status.style.display = 'block';
+            
+            if (type === 'success') {
+                setTimeout(() => {
+                    status.style.display = 'none';
+                }, 3000);
+            }
+        }
+        
+        // 刷新图片列表
+        async function refreshImageList() {
+            try {
+                const response = await fetch('/list');
+                const data = await response.json();
+                
+                if (data.files && data.files.length > 0) {
+                    imageGrid.innerHTML = data.files.map(file => `
+                        <div class="image-card">
+                            <input type="checkbox" class="image-checkbox" value="${file}" style="margin-right: 8px;">
+                            <div class="name">${file}</div>
+                            <button class="btn btn-primary" onclick="displayImage('${file}')">📺 显示</button>
+                            <button class="btn btn-danger" onclick="deleteImage('${file}')">🗑️ 删除</button>
+                        </div>
+                    `).join('');
+                } else {
+                    imageGrid.innerHTML = '<p style="color: #718096;">暂无图片</p>';
+                }
+            } catch (error) {
+                imageGrid.innerHTML = '<p style="color: #f56565;">加载失败</p>';
+            }
+        }
+        
+        // 显示图片
+        async function displayImage(filename) {
+            try {
+                const response = await fetch('/display?file=' + encodeURIComponent(filename));
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus('正在显示: ' + filename, 'success');
+                } else {
+                    showStatus('显示失败: ' + data.message, 'error');
+                }
+            } catch (error) {
+                showStatus('显示失败: ' + error.message, 'error');
+            }
+        }
+        
+        // 删除图片
+        async function deleteImage(filename) {
+            if (!confirm('确定要删除 ' + filename + ' 吗？')) return;
+            
+            try {
+                const response = await fetch('/delete?file=' + encodeURIComponent(filename));
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus('删除成功: ' + filename, 'success');
+                    refreshImageList();
+                } else {
+                    showStatus('删除失败: ' + data.message, 'error');
+                }
+            } catch (error) {
+                showStatus('删除失败: ' + error.message, 'error');
+            }
+        }
+        
+        // 播放选中的图片
+        async function playSelectedImages() {
+            const checkboxes = document.querySelectorAll('.image-checkbox:checked');
+            const selectedFiles = Array.from(checkboxes).map(cb => cb.value);
+            
+            if (selectedFiles.length === 0) {
+                showStatus('请先选择要播放的图片', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/playlist', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ playlist: selectedFiles })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus(`已设置播放列表 (${selectedFiles.length} 张图片)`, 'success');
+                } else {
+                    showStatus('设置播放列表失败: ' + data.message, 'error');
+                }
+            } catch (error) {
+                showStatus('设置播放列表失败: ' + error.message, 'error');
+            }
+        }
+        
+        // 停止播放列表（恢复全局轮播）
+        async function stopPlaylist() {
+            try {
+                const response = await fetch('/playlist', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ playlist: [] })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus('已恢复全局轮播', 'success');
+                    // 取消所有复选框
+                    document.querySelectorAll('.image-checkbox').forEach(cb => cb.checked = false);
+                } else {
+                    showStatus('操作失败: ' + data.message, 'error');
+                }
+            } catch (error) {
+                showStatus('操作失败: ' + error.message, 'error');
+            }
+        }
+        
+        // RGB 灯珠控制
+        function setLED(mode) {
+            const color = document.getElementById('colorPicker').value;
+            const brightness = brightnessSlider.value;
+            
+            fetch('/led', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode, color, brightness })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('LED 设置成功', 'success');
+                } else {
+                    showStatus('LED 设置失败', 'error');
+                }
+            })
+            .catch(error => {
+                showStatus('LED 设置失败: ' + error.message, 'error');
+            });
+        }
+        
+        // 亮度滑块
+        brightnessSlider.addEventListener('input', (e) => {
+            brightnessValue.textContent = e.target.value;
+        });
+        
+        // 页面加载时刷新图片列表
+        refreshImageList();
+    </script>
+</body>
+</html>
+)rawliteral";
+
+// 初始化 WiFi
+void WebServer_Init() {
+    Serial.println("\n========== WiFi 初始化 ==========");
+    
+    // 创建 SD 卡互斥锁
+    if (sdCardMutex == NULL) {
+        sdCardMutex = xSemaphoreCreateMutex();
+        Serial.println("✓ SD 卡互斥锁创建成功");
+    }
+    
+    // 创建上传目录
+    if (!SD_MMC.exists(UPLOAD_DIR)) {
+        SD_MMC.mkdir(UPLOAD_DIR);
+        Serial.printf("✓ 创建上传目录: %s\n", UPLOAD_DIR);
+    }
+    
+    // 配置 WiFi 为 AP + STA 双模
+    WiFi.mode(WIFI_AP_STA);
+    
+    // 启动 AP 模式
+    WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD);
+    IPAddress apIP = WiFi.softAPIP();
+    Serial.printf("✓ AP 模式已启动\n");
+    Serial.printf("  SSID: %s\n", WIFI_AP_SSID);
+    Serial.printf("  密码: %s\n", WIFI_AP_PASSWORD);
+    Serial.printf("  IP 地址: %s\n", apIP.toString().c_str());
+    
+    // 启动 mDNS 服务
+    if (MDNS.begin(MDNS_HOSTNAME)) {
+        Serial.printf("✓ mDNS 服务已启动\n");
+        Serial.printf("  访问地址: http://%s.local\n", MDNS_HOSTNAME);
+        MDNS.addService("http", "tcp", 80);
+    } else {
+        Serial.println("✗ mDNS 启动失败");
+    }
+    
+    // 配置 Web 服务器路由
+    
+    // 主页
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send_P(200, "text/html", index_html);
+    });
+    
+    // 文件上传
+    server.on("/upload", HTTP_POST,
+        [](AsyncWebServerRequest *request) {
+            request->send(200, "application/json", "{\"success\":true}");
+        },
+        [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+            // 开始上传
+            if (index == 0) {
+                Serial.printf("\n--- 开始上传文件: %s ---\n", filename.c_str());
+                uploadFilename = filename;
+                uploadedBytes = 0;
+                
+                // 获取 SD 卡锁
+                if (xSemaphoreTake(sdCardMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                    String filepath = String(UPLOAD_DIR) + "/temp_" + filename;
+                    uploadFile = SD_MMC.open(filepath.c_str(), FILE_WRITE);
+                    
+                    if (!uploadFile) {
+                        Serial.println("✗ 无法创建临时文件");
+                        xSemaphoreGive(sdCardMutex);
+                        request->send(500, "application/json", "{\"success\":false,\"message\":\"无法创建文件\"}");
+                        return;
+                    }
+                } else {
+                    Serial.println("✗ 无法获取 SD 卡锁");
+                    request->send(503, "application/json", "{\"success\":false,\"message\":\"SD 卡忙\"}");
+                    return;
+                }
+            }
+            
+            // 写入数据块
+            if (uploadFile && len) {
+                uploadFile.write(data, len);
+                uploadedBytes += len;
+                
+                // 每 100KB 打印一次进度
+                if (uploadedBytes % 102400 < len) {
+                    Serial.printf("  已上传: %d KB\n", uploadedBytes / 1024);
+                }
+            }
+            
+            // 上传完成
+            if (final) {
+                if (uploadFile) {
+                    uploadFile.close();
+                    
+                    // 重命名临时文件
+                    String tempPath = String(UPLOAD_DIR) + "/temp_" + filename;
+                    String finalPath = String(UPLOAD_DIR) + "/" + filename;
+                    
+                    // 如果目标文件已存在，先删除
+                    if (SD_MMC.exists(finalPath.c_str())) {
+                        SD_MMC.remove(finalPath.c_str());
+                    }
+                    
+                    // 重命名
+                    SD_MMC.rename(tempPath.c_str(), finalPath.c_str());
+                    
+                    xSemaphoreGive(sdCardMutex);
+                    
+                    Serial.printf("✓ 上传完成: %s (%d 字节)\n", filename.c_str(), uploadedBytes);
+                } else {
+                    xSemaphoreGive(sdCardMutex);
+                    Serial.println("✗ 上传失败");
+                }
+            }
+        }
+    );
+    
+    // 列出图片文件
+    server.on("/list", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String jsonList;
+        // 🔧 【核心修复】：使用相对路径，让 SD_MMC 库自动处理挂载点
+        if (listImageFiles(UPLOAD_DIR, jsonList)) {
+            request->send(200, "application/json", jsonList);
+        } else {
+            request->send(200, "application/json", "{\"files\":[]}");
+        }
+    });
+    
+    // 显示图片
+    server.on("/display", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (request->hasParam("file")) {
+            String filename = request->getParam("file")->value();
+            // 🔧 【核心修复】：使用相对路径，让 SD_MMC 库自动处理挂载点
+            String filepath = String(UPLOAD_DIR) + "/" + filename;
+            
+            // 更新当前显示文件
+            strncpy(currentDisplayFile, filepath.c_str(), sizeof(currentDisplayFile) - 1);
+            
+            Serial.printf("Web 请求显示: %s\n", filepath.c_str());
+            request->send(200, "application/json", "{\"success\":true}");
+        } else {
+            request->send(400, "application/json", "{\"success\":false,\"message\":\"缺少文件参数\"}");
+        }
+    });
+    
+    // 删除图片
+    server.on("/delete", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (request->hasParam("file")) {
+            String filename = request->getParam("file")->value();
+            
+            if (deleteImageFile(filename.c_str())) {
+                request->send(200, "application/json", "{\"success\":true}");
+            } else {
+                request->send(500, "application/json", "{\"success\":false,\"message\":\"删除失败\"}");
+            }
+        } else {
+            request->send(400, "application/json", "{\"success\":false,\"message\":\"缺少文件参数\"}");
+        }
+    });
+    
+    // 设置播放列表
+    server.on("/playlist", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            // 只处理完整的数据包
+            if (index + len != total) {
+                return;
+            }
+            
+            // 解析 JSON
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, data, len);
+            
+            if (error) {
+                Serial.printf("✗ JSON 解析失败: %s\n", error.c_str());
+                request->send(400, "application/json", "{\"success\":false,\"message\":\"JSON 解析失败\"}");
+                return;
+            }
+            
+            // 清空现有播放列表
+            customPlaylist.clear();
+            
+            // 获取播放列表数组
+            JsonArray playlist = doc["playlist"];
+            
+            if (playlist.size() == 0) {
+                // 空数组，恢复全局轮播
+                useCustomPlaylist = false;
+                Serial.println("✓ 已恢复全局轮播模式");
+                request->send(200, "application/json", "{\"success\":true,\"message\":\"已恢复全局轮播\"}");
+                return;
+            }
+            
+            // 添加文件到播放列表
+            for (JsonVariant file : playlist) {
+                String filename = file.as<String>();
+                customPlaylist.push_back(filename);
+                Serial.printf("  添加到播放列表: %s\n", filename.c_str());
+            }
+            
+            // 启用自定义播放列表
+            useCustomPlaylist = true;
+            
+            Serial.printf("✓ 播放列表已设置 (%d 张图片)\n", customPlaylist.size());
+            
+            String response = "{\"success\":true,\"count\":" + String(customPlaylist.size()) + "}";
+            request->send(200, "application/json", response);
+        }
+    );
+    
+    // RGB 灯珠控制 (预留接口)
+    server.on("/led", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            // TODO: 解析 JSON 并控制 RGB 灯珠
+            Serial.println("收到 LED 控制请求");
+            request->send(200, "application/json", "{\"success\":true}");
+        }
+    );
+    
+    // 启动服务器
+    server.begin();
+    Serial.println("✓ Web 服务器已启动");
+    Serial.println("==================================\n");
+}
+
+// 主循环处理 (异步库不需要)
+void WebServer_Loop() {
+    // ESPAsyncWebServer 是异步的，不需要在 loop 中调用
+}
+
+// 获取本地 IP (STA 模式)
+String getLocalIP() {
+    return WiFi.localIP().toString();
+}
+
+// 获取 AP IP
+String getAPIP() {
+    return WiFi.softAPIP().toString();
+}
+
+// 检查是否有客户端连接
+bool isClientConnected() {
+    return WiFi.softAPgetStationNum() > 0;
+}
+
+// 列出图片文件
+bool listImageFiles(const char* directory, String& jsonList) {
+    Serial.printf("\n--- 开始列出图片文件 ---\n");
+    Serial.printf("目录路径: %s\n", directory);
+    
+    if (xSemaphoreTake(sdCardMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println("✗ 无法获取 SD 卡锁");
+        return false;
+    }
+    
+    File dir = SD_MMC.open(directory);
+    if (!dir) {
+        Serial.println("✗ 无法打开目录");
+        xSemaphoreGive(sdCardMutex);
+        return false;
+    }
+    
+    if (!dir.isDirectory()) {
+        Serial.println("✗ 路径不是目录");
+        dir.close();
+        xSemaphoreGive(sdCardMutex);
+        return false;
+    }
+    
+    Serial.println("✓ 目录打开成功，开始遍历文件...");
+    
+    jsonList = "{\"files\":[";
+    bool first = true;
+    int fileCount = 0;
+    
+    File file = dir.openNextFile();
+    while (file) {
+        Serial.printf("  发现文件: %s (目录: %s)\n", file.name(), file.isDirectory() ? "是" : "否");
+        
+        if (!file.isDirectory()) {
+            String filename = String(file.name());
+            
+            // 🔧 【核心修复】：file.name() 可能返回完整路径，需要提取文件名
+            // 例如: "/sdcard/uploaded/123.jpg" -> "123.jpg"
+            int lastSlash = filename.lastIndexOf('/');
+            if (lastSlash >= 0) {
+                filename = filename.substring(lastSlash + 1);
+            }
+            
+            Serial.printf("    处理后的文件名: %s\n", filename.c_str());
+            
+            // 过滤图片文件
+            if (filename.endsWith(".jpg") || filename.endsWith(".jpeg") || 
+                filename.endsWith(".png") || filename.endsWith(".bmp") ||
+                filename.endsWith(".JPG") || filename.endsWith(".JPEG") ||
+                filename.endsWith(".PNG") || filename.endsWith(".BMP")) {
+                
+                if (!first) jsonList += ",";
+                jsonList += "\"" + filename + "\"";
+                first = false;
+                fileCount++;
+                Serial.printf("    ✓ 添加到列表: %s\n", filename.c_str());
+            }
+        }
+        file = dir.openNextFile();
+    }
+    
+    jsonList += "]}";
+    dir.close();
+    xSemaphoreGive(sdCardMutex);
+    
+    Serial.printf("✓ 列表生成完成，共 %d 个图片文件\n", fileCount);
+    Serial.printf("JSON: %s\n", jsonList.c_str());
+    Serial.println("--- 列出图片文件完成 ---\n");
+    
+    return true;
+}
+
+// 删除图片文件
+bool deleteImageFile(const char* filename) {
+    if (isFileInUse(filename)) {
+        Serial.printf("✗ 文件正在使用中，无法删除: %s\n", filename);
+        return false;
+    }
+    
+    if (xSemaphoreTake(sdCardMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return false;
+    }
+    
+    String filepath = String(UPLOAD_DIR) + "/" + filename;
+    bool result = SD_MMC.remove(filepath.c_str());
+    
+    xSemaphoreGive(sdCardMutex);
+    
+    if (result) {
+        Serial.printf("✓ 文件已删除: %s\n", filename);
+    } else {
+        Serial.printf("✗ 文件删除失败: %s\n", filename);
+    }
+    
+    return result;
+}
+
+// 检查文件是否正在使用
+bool isFileInUse(const char* filepath) {
+    return (strcmp(currentDisplayFile, filepath) == 0);
+}
+
+// 锁定文件
+void lockFile(const char* filepath) {
+    strncpy(currentDisplayFile, filepath, sizeof(currentDisplayFile) - 1);
+}
+
+// 解锁文件
+void unlockFile(const char* filepath) {
+    if (strcmp(currentDisplayFile, filepath) == 0) {
+        currentDisplayFile[0] = '\0';
+    }
+}
