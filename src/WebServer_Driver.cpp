@@ -3,6 +3,7 @@
 
 // 全局对象
 AsyncWebServer server(80);
+Preferences preferences;             // NVS 存储
 SemaphoreHandle_t sdCardMutex = NULL;
 char currentDisplayFile[100] = "";
 
@@ -10,10 +11,214 @@ char currentDisplayFile[100] = "";
 std::vector<String> customPlaylist;  // 自定义播放列表
 bool useCustomPlaylist = false;      // 是否使用自定义播放列表
 
+// WiFi 状态
+bool isAPMode = false;               // 是否处于 AP 模式
+
 // 上传状态
 File uploadFile;
 String uploadFilename = "";
 size_t uploadedBytes = 0;
+
+// WiFi 配网界面 HTML
+const char wifi_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WiFi 配网</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            max-width: 500px;
+            width: 100%;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 { font-size: 2em; margin-bottom: 10px; }
+        .header p { opacity: 0.9; }
+        .content { padding: 30px; }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 1em;
+            transition: border-color 0.3s;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .btn {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        .btn-secondary {
+            background: #e2e8f0;
+            color: #333;
+            margin-top: 10px;
+        }
+        .btn-secondary:hover {
+            background: #cbd5e0;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            display: none;
+            text-align: center;
+        }
+        .status.success {
+            background: #c6f6d5;
+            color: #22543d;
+            display: block;
+        }
+        .status.error {
+            background: #fed7d7;
+            color: #742a2a;
+            display: block;
+        }
+        .info {
+            background: #f0f4ff;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            color: #4c51bf;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📡 WiFi 配网</h1>
+            <p>配置 ESP32 连接到您的 WiFi 网络</p>
+        </div>
+        
+        <div class="content">
+            <div class="info">
+                💡 提示：配置成功后，设备将自动重启并连接到指定的 WiFi 网络。
+            </div>
+            
+            <form id="wifiForm">
+                <div class="form-group">
+                    <label for="ssid">WiFi 名称 (SSID)</label>
+                    <input type="text" id="ssid" name="ssid" placeholder="请输入 WiFi 名称" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="password">WiFi 密码</label>
+                    <input type="password" id="password" name="password" placeholder="请输入 WiFi 密码" required>
+                </div>
+                
+                <button type="submit" class="btn btn-primary">💾 保存并重启</button>
+                <button type="button" class="btn btn-secondary" onclick="window.location.href='/'">🔙 返回主页</button>
+            </form>
+            
+            <div class="status" id="status"></div>
+        </div>
+    </div>
+    
+    <script>
+        const form = document.getElementById('wifiForm');
+        const status = document.getElementById('status');
+        
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const ssid = document.getElementById('ssid').value;
+            const password = document.getElementById('password').value;
+            
+            if (!ssid) {
+                showStatus('请输入 WiFi 名称', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/setwifi', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ssid, password })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus('✓ 配置保存成功！设备将在 2 秒后重启...', 'success');
+                    
+                    // 禁用表单
+                    form.querySelectorAll('input, button').forEach(el => el.disabled = true);
+                    
+                    // 3 秒后跳转提示页面
+                    setTimeout(() => {
+                        document.body.innerHTML = `
+                            <div style="display: flex; align-items: center; justify-content: center; min-height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                                <div style="background: white; padding: 40px; border-radius: 20px; text-align: center; max-width: 500px;">
+                                    <h2 style="color: #667eea; margin-bottom: 20px;">🎉 配置成功</h2>
+                                    <p style="color: #666; margin-bottom: 20px;">设备正在重启并连接到 WiFi...</p>
+                                    <p style="color: #999; font-size: 0.9em;">请稍后连接到相同的 WiFi 网络，然后访问 <strong>http://vision.local</strong></p>
+                                </div>
+                            </div>
+                        `;
+                    }, 2000);
+                } else {
+                    showStatus('✗ 配置失败: ' + data.message, 'error');
+                }
+            } catch (error) {
+                showStatus('✗ 配置失败: ' + error.message, 'error');
+            }
+        });
+        
+        function showStatus(message, type) {
+            status.textContent = message;
+            status.className = 'status ' + type;
+            status.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
+)rawliteral";
 
 // Web 界面 HTML (嵌入式)
 const char index_html[] PROGMEM = R"rawliteral(
@@ -196,6 +401,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         <div class="header">
             <h1>🖼️ ESP32 图片显示控制台</h1>
             <p>WiFi 无线图片传输与显示控制</p>
+            <p id="ipDisplay" style="margin-top: 10px; font-weight: bold; color: #e2e8f0;">🌍 局域网 IP: 获取中...</p>
         </div>
         
         <div class="content">
@@ -240,6 +446,13 @@ const char index_html[] PROGMEM = R"rawliteral(
                     <button class="btn btn-primary" onclick="setLED('breathe')">💨 呼吸灯</button>
                     <button class="btn btn-danger" onclick="setLED('off')">⚫ 关闭</button>
                 </div>
+            </div>
+            
+            <!-- WiFi 配网入口 -->
+            <div class="section">
+                <h2>📡 WiFi 配置</h2>
+                <p style="color: #718096; margin-bottom: 15px;">配置设备连接到您的 WiFi 网络</p>
+                <button class="btn btn-primary" onclick="window.location.href='/wifi'">⚙️ WiFi 配网</button>
             </div>
         </div>
     </div>
@@ -577,8 +790,36 @@ const char index_html[] PROGMEM = R"rawliteral(
             brightnessValue.textContent = e.target.value;
         });
         
-        // 页面加载时刷新图片列表
+        // 获取系统状态（IP 地址等）
+        async function fetchSystemStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                
+                const ipDisplay = document.getElementById('ipDisplay');
+                
+                if (data.connected) {
+                    ipDisplay.textContent = `🌍 局域网 IP: ${data.sta_ip}`;
+                    ipDisplay.style.color = '#c6f6d5';  // 绿色表示已连接
+                } else if (data.ap_mode) {
+                    ipDisplay.textContent = `📡 AP 模式 IP: ${data.ap_ip} (未连接局域网)`;
+                    ipDisplay.style.color = '#fed7d7';  // 红色表示 AP 模式
+                } else {
+                    ipDisplay.textContent = '🌍 局域网 IP: 未连接';
+                    ipDisplay.style.color = '#fed7d7';
+                }
+            } catch (error) {
+                console.error('获取系统状态失败:', error);
+                document.getElementById('ipDisplay').textContent = '🌍 局域网 IP: 获取失败';
+            }
+        }
+        
+        // 页面加载时刷新图片列表和系统状态
         refreshImageList();
+        fetchSystemStatus();
+        
+        // 每 10 秒自动刷新一次状态
+        setInterval(fetchSystemStatus, 10000);
     </script>
 </body>
 </html>
@@ -600,16 +841,50 @@ void WebServer_Init() {
         Serial.printf("✓ 创建上传目录: %s\n", UPLOAD_DIR);
     }
     
-    // 配置 WiFi 为 AP + STA 双模
-    WiFi.mode(WIFI_AP_STA);
+    // 🔧 【配网逻辑】尝试从 NVS 读取 WiFi 配置
+    String savedSSID, savedPassword;
+    bool hasConfig = loadWiFiConfig(savedSSID, savedPassword);
     
-    // 启动 AP 模式
-    WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD);
-    IPAddress apIP = WiFi.softAPIP();
-    Serial.printf("✓ AP 模式已启动\n");
-    Serial.printf("  SSID: %s\n", WIFI_AP_SSID);
-    Serial.printf("  密码: %s\n", WIFI_AP_PASSWORD);
-    Serial.printf("  IP 地址: %s\n", apIP.toString().c_str());
+    if (hasConfig && savedSSID.length() > 0) {
+        Serial.println("✓ 检测到已保存的 WiFi 配置");
+        Serial.printf("  SSID: %s\n", savedSSID.c_str());
+        
+        // 尝试连接到保存的 WiFi
+        if (connectToWiFi(savedSSID, savedPassword, WIFI_CONNECT_TIMEOUT)) {
+            // 连接成功，使用 STA 模式
+            isAPMode = false;
+            Serial.println("✓ WiFi 连接成功 (STA 模式)");
+            Serial.printf("  IP 地址: %s\n", WiFi.localIP().toString().c_str());
+            
+            // 可选：启动隐藏 AP 作为备用（注释掉则完全不开启 AP）
+            // WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD, 1, true);  // 最后一个参数 true 表示隐藏
+            // Serial.println("✓ 备用 AP 已启动（隐藏）");
+        } else {
+            // 连接失败，启动 AP 模式
+            Serial.println("✗ WiFi 连接失败，启动 AP 配网模式");
+            WiFi.mode(WIFI_AP);
+            WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD);
+            isAPMode = true;
+            
+            IPAddress apIP = WiFi.softAPIP();
+            Serial.printf("✓ AP 模式已启动\n");
+            Serial.printf("  SSID: %s\n", WIFI_AP_SSID);
+            Serial.printf("  密码: %s\n", WIFI_AP_PASSWORD);
+            Serial.printf("  IP 地址: %s\n", apIP.toString().c_str());
+        }
+    } else {
+        // 没有保存的配置，直接启动 AP 模式
+        Serial.println("✓ 未检测到 WiFi 配置，启动 AP 配网模式");
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD);
+        isAPMode = true;
+        
+        IPAddress apIP = WiFi.softAPIP();
+        Serial.printf("✓ AP 模式已启动\n");
+        Serial.printf("  SSID: %s\n", WIFI_AP_SSID);
+        Serial.printf("  密码: %s\n", WIFI_AP_PASSWORD);
+        Serial.printf("  IP 地址: %s\n", apIP.toString().c_str());
+    }
     
     // 启动 mDNS 服务
     if (MDNS.begin(MDNS_HOSTNAME)) {
@@ -626,6 +901,73 @@ void WebServer_Init() {
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->send_P(200, "text/html", index_html);
     });
+    
+    // 🔧 【新增】WiFi 配网页面
+    server.on("/wifi", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send_P(200, "text/html", wifi_html);
+    });
+    
+    // 🔧 【新增】系统状态 API
+    server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String json = "{";
+        
+        // 检查 STA 模式连接状态
+        bool connected = (WiFi.status() == WL_CONNECTED);
+        String staIP = connected ? WiFi.localIP().toString() : "未连接";
+        
+        json += "\"sta_ip\":\"" + staIP + "\",";
+        json += "\"connected\":" + String(connected ? "true" : "false") + ",";
+        json += "\"ap_mode\":" + String(isAPMode ? "true" : "false") + ",";
+        json += "\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\"";
+        
+        json += "}";
+        
+        request->send(200, "application/json", json);
+    });
+    
+    // 🔧 【新增】WiFi 配置保存接口
+    server.on("/setwifi", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            // 只处理完整的数据包
+            if (index + len != total) {
+                return;
+            }
+            
+            // 解析 JSON
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, data, len);
+            
+            if (error) {
+                Serial.printf("✗ JSON 解析失败: %s\n", error.c_str());
+                request->send(400, "application/json", "{\"success\":false,\"message\":\"JSON 解析失败\"}");
+                return;
+            }
+            
+            String ssid = doc["ssid"].as<String>();
+            String password = doc["password"].as<String>();
+            
+            if (ssid.length() == 0) {
+                request->send(400, "application/json", "{\"success\":false,\"message\":\"SSID 不能为空\"}");
+                return;
+            }
+            
+            // 保存到 NVS
+            if (saveWiFiConfig(ssid, password)) {
+                Serial.printf("✓ WiFi 配置已保存\n");
+                Serial.printf("  SSID: %s\n", ssid.c_str());
+                
+                request->send(200, "application/json", "{\"success\":true,\"message\":\"配置保存成功\"}");
+                
+                // 延迟 2 秒后重启
+                delay(2000);
+                Serial.println("✓ 正在重启...");
+                ESP.restart();
+            } else {
+                Serial.println("✗ WiFi 配置保存失败");
+                request->send(500, "application/json", "{\"success\":false,\"message\":\"配置保存失败\"}");
+            }
+        }
+    );
     
     // 文件上传
     server.on("/upload", HTTP_POST,
@@ -936,4 +1278,69 @@ void unlockFile(const char* filepath) {
     if (strcmp(currentDisplayFile, filepath) == 0) {
         currentDisplayFile[0] = '\0';
     }
+}
+
+// ========== WiFi 配网辅助函数 ==========
+
+// 从 NVS 加载 WiFi 配置
+bool loadWiFiConfig(String& ssid, String& password) {
+    preferences.begin("wifi", true);  // 只读模式
+    
+    ssid = preferences.getString("ssid", "");
+    password = preferences.getString("password", "");
+    
+    preferences.end();
+    
+    return (ssid.length() > 0);
+}
+
+// 保存 WiFi 配置到 NVS
+bool saveWiFiConfig(const String& ssid, const String& password) {
+    preferences.begin("wifi", false);  // 读写模式
+    
+    bool success = true;
+    
+    if (preferences.putString("ssid", ssid) == 0) {
+        success = false;
+    }
+    
+    if (preferences.putString("password", password) == 0) {
+        success = false;
+    }
+    
+    preferences.end();
+    
+    return success;
+}
+
+// 连接到 WiFi
+bool connectToWiFi(const String& ssid, const String& password, unsigned long timeout) {
+    Serial.printf("正在连接到 WiFi: %s\n", ssid.c_str());
+    
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid.c_str(), password.c_str());
+    
+    unsigned long startTime = millis();
+    
+    while (WiFi.status() != WL_CONNECTED) {
+        if (millis() - startTime > timeout) {
+            Serial.println("✗ WiFi 连接超时");
+            return false;
+        }
+        
+        delay(500);
+        Serial.print(".");
+    }
+    
+    Serial.println();
+    return true;
+}
+
+// 清除 WiFi 配置
+void clearWiFiConfig() {
+    preferences.begin("wifi", false);
+    preferences.clear();
+    preferences.end();
+    
+    Serial.println("✓ WiFi 配置已清除");
 }
