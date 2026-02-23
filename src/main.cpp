@@ -18,6 +18,7 @@
 #include "Simulated_Gesture.h"
 #include "Image_Decoder.h"
 #include "WebServer_Driver.h"
+#include "LED_Driver.h"
 
 // 后台驱动任务
 void DriverTask(void *parameter) {
@@ -102,6 +103,9 @@ void setup()
   
   // 初始化 Web 服务器
   WebServer_Init();
+  
+  // 初始化 RGB LED 灯珠
+  LED_Init();
   
   // 延迟以确保所有初始化完成
   delay(1000);

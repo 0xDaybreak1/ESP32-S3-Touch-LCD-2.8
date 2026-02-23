@@ -1,4 +1,5 @@
 #include "WebServer_Driver.h"
+#include "LED_Driver.h"
 #include <ArduinoJson.h>
 
 // 全局对象
@@ -1130,11 +1131,62 @@ void WebServer_Init() {
         }
     );
     
-    // RGB 灯珠控制 (预留接口)
+    // RGB 灯珠控制
     server.on("/led", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
         [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-            // TODO: 解析 JSON 并控制 RGB 灯珠
-            Serial.println("收到 LED 控制请求");
+            // 只处理完整的数据包
+            if (index + len != total) {
+                return;
+            }
+            
+            // 解析 JSON
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, data, len);
+            
+            if (error) {
+                Serial.printf("✗ LED JSON 解析失败: %s\n", error.c_str());
+                request->send(400, "application/json", "{\"success\":false,\"message\":\"JSON 解析失败\"}");
+                return;
+            }
+            
+            // 提取参数
+            String mode = doc["mode"].as<String>();
+            String color = doc["color"].as<String>();
+            int brightness = doc["brightness"].as<int>();
+            
+            Serial.printf("\n--- LED 控制请求 ---\n");
+            Serial.printf("  模式: %s\n", mode.c_str());
+            Serial.printf("  颜色: %s\n", color.c_str());
+            Serial.printf("  亮度: %d%%\n", brightness);
+            
+            // 设置模式
+            if (mode == "solid") {
+                LED_SetMode(LED_SOLID);
+            } else if (mode == "flow") {
+                LED_SetMode(LED_FLOW);
+            } else if (mode == "breathe") {
+                LED_SetMode(LED_BREATHE);
+            } else if (mode == "off") {
+                LED_SetMode(LED_OFF);
+            } else {
+                Serial.printf("✗ 未知模式: %s\n", mode.c_str());
+                request->send(400, "application/json", "{\"success\":false,\"message\":\"未知模式\"}");
+                return;
+            }
+            
+            // 设置颜色 (将 16 进制字符串转换为 CRGB)
+            if (color.length() > 0) {
+                CRGB rgbColor = hexToRGB(color);
+                LED_SetColor(rgbColor);
+            }
+            
+            // 设置亮度 (将 0-100 映射到 0-255)
+            if (brightness >= 0 && brightness <= 100) {
+                uint8_t ledBrightness = map(brightness, 0, 100, 0, 255);
+                LED_SetBrightness(ledBrightness);
+            }
+            
+            Serial.println("✓ LED 控制成功");
             request->send(200, "application/json", "{\"success\":true}");
         }
     );
