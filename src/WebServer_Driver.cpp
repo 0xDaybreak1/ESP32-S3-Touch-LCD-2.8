@@ -1,5 +1,6 @@
 #include "WebServer_Driver.h"
 #include "LED_Driver.h"
+#include "ColorTemp_Filter.h"
 #include <ArduinoJson.h>
 
 // 全局对象
@@ -455,6 +456,21 @@ const char index_html[] PROGMEM = R"rawliteral(
                 <p style="color: #718096; margin-bottom: 15px;">配置设备连接到您的 WiFi 网络</p>
                 <button class="btn btn-primary" onclick="window.location.href='/wifi'">⚙️ WiFi 配网</button>
             </div>
+            
+            <!-- 色温调节 -->
+            <div class="section">
+                <h2>🌡️ 色温调节</h2>
+                <p style="color: #718096; margin-bottom: 15px;">调整图片显示的色温（暖色/冷色）</p>
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <span style="color: #3b82f6; font-size: 1.5em;">❄️</span>
+                    <input type="range" class="slider" id="colorTempSlider" min="-100" max="100" value="0" style="flex: 1;">
+                    <span style="color: #f59e0b; font-size: 1.5em;">🔥</span>
+                </div>
+                <p style="margin-top: 15px; text-align: center;">
+                    色温值: <span id="colorTempValue" style="font-weight: bold; color: #667eea;">0</span>
+                    <span id="colorTempLabel" style="color: #718096;">(中性)</span>
+                </p>
+            </div>
         </div>
     </div>
     
@@ -821,6 +837,56 @@ const char index_html[] PROGMEM = R"rawliteral(
         
         // 每 10 秒自动刷新一次状态
         setInterval(fetchSystemStatus, 10000);
+        
+        // 色温调节滑块
+        const colorTempSlider = document.getElementById('colorTempSlider');
+        const colorTempValue = document.getElementById('colorTempValue');
+        const colorTempLabel = document.getElementById('colorTempLabel');
+        
+        // 防抖函数：避免滑动时请求过于密集
+        let colorTempTimeout = null;
+        
+        colorTempSlider.addEventListener('input', (e) => {
+            const value = parseInt(e.target.value);
+            colorTempValue.textContent = value;
+            
+            // 更新标签
+            if (value > 30) {
+                colorTempLabel.textContent = '(暖色调)';
+                colorTempLabel.style.color = '#f59e0b';
+            } else if (value < -30) {
+                colorTempLabel.textContent = '(冷色调)';
+                colorTempLabel.style.color = '#3b82f6';
+            } else {
+                colorTempLabel.textContent = '(中性)';
+                colorTempLabel.style.color = '#718096';
+            }
+            
+            // 防抖：300ms 后才发送请求
+            clearTimeout(colorTempTimeout);
+            colorTempTimeout = setTimeout(() => {
+                setColorTemperature(value);
+            }, 300);
+        });
+        
+        // 发送色温调节请求
+        async function setColorTemperature(tempOffset) {
+            try {
+                const response = await fetch('/colortemp', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tempOffset })
+                });
+                
+                const data = await response.json();
+                
+                if (!data.success) {
+                    console.error('色温设置失败:', data.message);
+                }
+            } catch (error) {
+                console.error('色温设置失败:', error);
+            }
+        }
     </script>
 </body>
 </html>
@@ -1187,6 +1253,38 @@ void WebServer_Init() {
             }
             
             Serial.println("✓ LED 控制成功");
+            request->send(200, "application/json", "{\"success\":true}");
+        }
+    );
+    
+    // 色温调节接口
+    server.on("/colortemp", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            // 只处理完整的数据包
+            if (index + len != total) {
+                return;
+            }
+            
+            // 解析 JSON
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, data, len);
+            
+            if (error) {
+                Serial.printf("✗ 色温 JSON 解析失败: %s\n", error.c_str());
+                request->send(400, "application/json", "{\"success\":false,\"message\":\"JSON 解析失败\"}");
+                return;
+            }
+            
+            // 提取色温偏移量
+            int tempOffset = doc["tempOffset"].as<int>();
+            
+            Serial.printf("\n--- 色温调节请求 ---\n");
+            Serial.printf("  色温偏移: %d\n", tempOffset);
+            
+            // 设置色温（不在回调中进行耗时处理，只更新全局变量）
+            ColorTemp_SetOffset(tempOffset);
+            
+            Serial.println("✓ 色温设置成功");
             request->send(200, "application/json", "{\"success\":true}");
         }
     );

@@ -3,16 +3,19 @@
  * @brief ESP32-S3 图片解码器实现 - 支持 JPEG/PNG/BMP 格式
  * @author Kiro
  * @date 2026-02-22
+ * @update 2026-02-25 - 集成色温滤镜功能
  * 
  * 核心修复：
  * 1. 修复文件后缀识别漏洞（.jpg/.jpeg/.png 统一识别）
  * 2. 强制使用 PSRAM 分配大块内存，避免 SRAM 溢出
  * 3. 完美适配 PNGdec 的文件回调，支持 SD_MMC
  * 4. 所有文件读取完成后立即关闭，释放 SD 卡总线
+ * 5. 集成色温滤镜，支持实时色温调节（暖色/冷色）
  */
 
 #include "Image_Decoder.h"
 #include "Display_ST7789.h"
+#include "ColorTemp_Filter.h"  // 色温滤镜模块
 #include <esp_heap_caps.h>
 
 // ============================================================================
@@ -143,6 +146,11 @@ bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bi
         return false;
     }
     
+    // 🎨 应用色温滤镜（如果色温不为默认值）
+    if (currentColorTemp != COLOR_TEMP_DEFAULT) {
+        applyColorTemperature(bitmap, w * h);
+    }
+    
     // 设置显示窗口
     LCD_SetCursor(x, y, x + w - 1, y + h - 1);
     
@@ -252,6 +260,11 @@ int pngDrawCallback(PNGDRAW* pDraw) {
     if (y >= LCD_HEIGHT || w > LCD_WIDTH) {
         Serial.printf("⚠️ PNG 回调：坐标超出屏幕范围 (y=%d, w=%d)\n", y, w);
         return 0;
+    }
+    
+    // 🎨 应用色温滤镜（如果色温不为默认值）
+    if (currentColorTemp != COLOR_TEMP_DEFAULT) {
+        applyColorTemperature(pPixels, w);
     }
     
     // 设置显示窗口（一行）
@@ -590,6 +603,11 @@ bool displayBMP(const char* filename) {
             // 转换为 RGB565 格式
             // RGB565: RRRRRGGGGGGBBBBB (5 位红，6 位绿，5 位蓝)
             rowBuffer[x] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3);
+        }
+        
+        // 🎨 应用色温滤镜（如果色温不为默认值）
+        if (currentColorTemp != COLOR_TEMP_DEFAULT) {
+            applyColorTemperature(rowBuffer, width);
         }
         
         // 显示这一行

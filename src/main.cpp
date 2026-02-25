@@ -19,6 +19,7 @@
 #include "Image_Decoder.h"
 #include "WebServer_Driver.h"
 #include "LED_Driver.h"
+#include "ColorTemp_Filter.h"
 
 // 后台驱动任务
 void DriverTask(void *parameter) {
@@ -107,6 +108,9 @@ void setup()
   // 初始化 RGB LED 灯珠
   LED_Init();
   
+  // 初始化色温滤镜
+  ColorTemp_Init();
+  
   // 延迟以确保所有初始化完成
   delay(1000);
   
@@ -192,6 +196,25 @@ void loop()
 
     static unsigned long lastSwitchTime = 0;
     const unsigned long displayInterval = 5000; 
+
+    // 🎨 检查色温是否变化
+    if (colorTempChanged) {
+        colorTempChanged = false;
+        
+        Serial.printf("\n--- 色温已变化: %d，重新渲染当前图片 ---\n", currentColorTemp);
+        
+        // 如果有当前显示的图片，重新渲染
+        if (strlen(currentDisplayFile) > 0) {
+            if (xSemaphoreTake(sdCardMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                if (loadAndDisplayImage(currentDisplayFile)) {
+                    Serial.println("✓ 色温调节成功！");
+                } else {
+                    Serial.println("✗ 色温调节失败！");
+                }
+                xSemaphoreGive(sdCardMutex);
+            }
+        }
+    }
 
     // 检查是否有 Web 请求显示图片
     if (strlen(currentDisplayFile) > 0) {
